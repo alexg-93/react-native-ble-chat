@@ -17,6 +17,11 @@ expo-env.d.ts
 *.key
 *.mobileprovision
 
+# iOS build artifacts
+ios/Pods/
+ios/build/
+ios/DerivedData/
+
 # Metro
 .metro-health-check*
 

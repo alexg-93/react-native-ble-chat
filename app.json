@@ -1,7 +1,20 @@
 {
   "expo": {
-    "name": "MyApp",
-    "slug": "MyApp",
-    "version": "1.0.0"
+    "name": "BLEchat",
+    "slug": "BLEchat",
+    "version": "1.0.0",
+    "scheme": "blechat",
+    "icon": "./assets/icon.png",
+    "ios": {
+      "bundleIdentifier": "com.alexgordienko.BLEchat",
+      "infoPlist": {
+        "NSBluetoothAlwaysUsageDescription": "This app uses Bluetooth to scan for and connect to nearby BLE devices.",
+        "NSBluetoothPeripheralUsageDescription": "This app advertises as a BLE peripheral so other devices can discover and connect to it."
+      }
+    },
+    "plugins": [
+      "./plugins/withPodfilePatches",
+      "expo-sqlite"
+    ]
   }
 }

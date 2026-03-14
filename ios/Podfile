@@ -1,3 +1,5 @@
+# Set by expo-router. This enables Fabric-only features from react-native-screens
+ENV['RNS_GAMMA_ENABLED'] ||= '1'
 require File.join(File.dirname(`node --print "require.resolve('expo/package.json')"`), "scripts/autolinking")
 require File.join(File.dirname(`node --print "require.resolve('react-native/package.json')"`), "scripts/react_native_pods")
 
@@ -59,5 +61,41 @@ target 'MyApp' do
       :mac_catalyst_enabled => false,
       :ccache_enabled => ccache_enabled?(podfile_properties),
     )
+
+    # withPodfilePatches applied
+
+    # -------------------------------------------------------------------------
+    # Fix: Swift 5.9 language mode (avoids Swift 6 strict concurrency errors
+    # in expo-modules-core when building with Xcode 16 / Swift 6.1 compiler)
+    # -------------------------------------------------------------------------
+    installer.pods_project.targets.each do |target|
+      target.build_configurations.each do |config|
+        config.build_settings['SWIFT_VERSION'] = '5.9'
+      end
+    end
+
+    # -------------------------------------------------------------------------
+    # Fix 3: Remove @MainActor from conformance-list positions in expo-modules-core
+    # (Swift 5.9 compat mode rejects @MainActor in that position)
+    # -------------------------------------------------------------------------
+    root = File.expand_path('..', __dir__)
+    patches = {
+      'node_modules/expo-modules-core/ios/Core/Views/SwiftUI/SwiftUIHostingView.swift' =>
+        { from: ', @MainActor AnyExpoSwiftUIHostingView {', to: ', AnyExpoSwiftUIHostingView {' },
+      'node_modules/expo-modules-core/ios/Core/Views/SwiftUI/SwiftUIVirtualView.swift' =>
+        { from: ': @MainActor ExpoSwiftUI.ViewWrapper {', to: ': ExpoSwiftUI.ViewWrapper {' },
+      'node_modules/expo-modules-core/ios/Core/Views/ViewDefinition.swift' =>
+        { from: ': @MainActor AnyArgument {', to: ': AnyArgument {' },
+    }
+    patches.each do |relative_path, patch|
+      file_path = File.join(root, relative_path)
+      next unless File.exist?(file_path)
+      content = File.read(file_path)
+      if content.include?(patch[:from])
+        File.write(file_path, content.gsub(patch[:from], patch[:to]))
+        puts "[Podfile] Patched #{File.basename(file_path)}"
+      end
+    end
+
   end
 end

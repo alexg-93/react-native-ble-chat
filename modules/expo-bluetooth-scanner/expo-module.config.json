@@ -1,0 +1,9 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": {
+    "modules": ["ExpoBluetoothScannerModule"]
+  },
+  "android": {
+    "modules": ["expo.modules.bluetoothscanner.ExpoBluetoothScannerModule"]
+  }
+}
