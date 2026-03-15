@@ -1,8 +1,12 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, FlatList,
-  StyleSheet, KeyboardAvoidingView, Platform, ActivityIndicator, Animated,
+  StyleSheet, KeyboardAvoidingView, Platform, ActivityIndicator,
 } from 'react-native';
+import Animated, {
+  useSharedValue, useAnimatedStyle, withRepeat, withSequence,
+  withTiming, withDelay, Easing,
+} from 'react-native-reanimated';
 import { useRoute, useIsFocused } from '@react-navigation/native';
 import type { RouteProp } from '@react-navigation/native';
 import { usePeers } from '../hooks/usePeers';
@@ -15,38 +19,41 @@ function formatTime(ts: number): string {
   return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-function TypingDots() {
-  const dot0 = useRef(new Animated.Value(0)).current;
-  const dot1 = useRef(new Animated.Value(0)).current;
-  const dot2 = useRef(new Animated.Value(0)).current;
+const TYPING_DURATION = 300;
+const TYPING_PAUSE = 450;
 
+function makeDotAnimation(v: ReturnType<typeof useSharedValue<number>>, delay: number) {
+  v.value = withDelay(
+    delay,
+    withRepeat(
+      withSequence(
+        withTiming(1, { duration: TYPING_DURATION, easing: Easing.inOut(Easing.ease) }),
+        withTiming(0, { duration: TYPING_DURATION, easing: Easing.inOut(Easing.ease) }),
+        withDelay(TYPING_PAUSE - delay, withTiming(0, { duration: 0 })),
+      ),
+      -1,
+    ),
+  );
+}
+
+function TypingDot({ delay }: { delay: number }) {
+  const v = useSharedValue(0);
   useEffect(() => {
-    const make = (v: Animated.Value, delay: number) =>
-      Animated.loop(
-        Animated.sequence([
-          Animated.delay(delay),
-          Animated.timing(v, { toValue: 1, duration: 300, useNativeDriver: true }),
-          Animated.timing(v, { toValue: 0, duration: 300, useNativeDriver: true }),
-          Animated.delay(450 - delay),
-        ]),
-      );
-    const a0 = make(dot0, 0);
-    const a1 = make(dot1, 150);
-    const a2 = make(dot2, 300);
-    a0.start(); a1.start(); a2.start();
-    return () => { a0.stop(); a1.stop(); a2.stop(); };
-  }, [dot0, dot1, dot2]);
+    makeDotAnimation(v, delay);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const aStyle = useAnimatedStyle(() => ({
+    opacity: 0.3 + v.value * 0.7,
+    transform: [{ scale: 0.7 + v.value * 0.4 }],
+  }));
+  return <Animated.View style={[s.dot, aStyle]} />;
+}
 
-  const dotStyle = (v: Animated.Value) => ({
-    opacity: v.interpolate({ inputRange: [0, 1], outputRange: [0.3, 1] }),
-    transform: [{ scale: v.interpolate({ inputRange: [0, 1], outputRange: [0.7, 1.1] }) }],
-  });
-
+function TypingDots() {
   return (
     <View style={s.dotsRow}>
-      <Animated.View style={[s.dot, dotStyle(dot0)]} />
-      <Animated.View style={[s.dot, dotStyle(dot1)]} />
-      <Animated.View style={[s.dot, dotStyle(dot2)]} />
+      <TypingDot delay={0} />
+      <TypingDot delay={150} />
+      <TypingDot delay={300} />
     </View>
   );
 }
