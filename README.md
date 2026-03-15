@@ -6,6 +6,37 @@ Each device simultaneously acts as a **Central** (scanner/client) and a **Periph
 
 ---
 
+## Screenshots
+
+<table>
+  <tr>
+    <td align="center"><b>BLE Scanner</b></td>
+    <td align="center"><b>Scanner (scanning)</b></td>
+    <td align="center"><b>Device expanded</b></td>
+    <td align="center"><b>GATT Explorer</b></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/scanner.png" width="180"/></td>
+    <td><img src="docs/screenshots/scanner-scanning.png" width="180"/></td>
+    <td><img src="docs/screenshots/scanner-expanded.png" width="180"/></td>
+    <td><img src="docs/screenshots/gatt-explorer.png" width="180"/></td>
+  </tr>
+  <tr>
+    <td align="center"><b>BLE Peripheral</b></td>
+    <td align="center"><b>BLE Peers</b></td>
+    <td align="center"><b>Chat</b></td>
+    <td></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/peripheral.png" width="180"/></td>
+    <td><img src="docs/screenshots/peers.png" width="180"/></td>
+    <td><img src="docs/screenshots/chat.png" width="180"/></td>
+    <td></td>
+  </tr>
+</table>
+
+---
+
 ## Features
 
 - **BLE Device Scanner** — discover all nearby Bluetooth devices in real-time with RSSI, signal strength, distance estimation, and manufacturer identification
