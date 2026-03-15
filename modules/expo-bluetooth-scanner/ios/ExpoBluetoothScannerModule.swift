@@ -89,14 +89,13 @@ private class BLEDelegate: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
     let id = peripheral.identifier.uuidString
     let localName  = advertisementData[CBAdvertisementDataLocalNameKey] as? String
 
-    // Resolve name: update cache with any non-empty name from this packet,
-    // then always read from cache. This avoids the bug where peripheral.name
-    // returns "" (empty string, not nil) which would bypass the ?? operator.
-    let rawName = localName ?? peripheral.name
-    if let n = rawName, !n.isEmpty {
+    // Only cache names that come from the live advertisement packet.
+    // peripheral.name is cached by iOS itself and may be stale after a name change,
+    // so we use it only as a display fallback, never write it into nameCache.
+    if let n = localName, !n.isEmpty {
       nameCache[id] = n
     }
-    let name = nameCache[id] ?? ""
+    let name = nameCache[id] ?? peripheral.name ?? ""
 
     let serviceUUIDs: [String] = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID])?.map { $0.uuidString } ?? []
     let txPower    = advertisementData[CBAdvertisementDataTxPowerLevelKey] as? Int
@@ -302,6 +301,7 @@ public class ExpoBluetoothScannerModule: Module {
         }
         guard !self.isScanning else { return }
         self.discoveredDeviceIds.removeAll()
+        self.nameCache.removeAll()   // fresh scan — don't serve stale cached names
         self.isScanning = true
         c.scanForPeripherals(withServices: nil,
                              options: [CBCentralManagerScanOptionAllowDuplicatesKey: allowDuplicates])
