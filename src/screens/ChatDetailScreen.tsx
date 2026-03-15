@@ -6,7 +6,7 @@ import {
 import { useRoute, useIsFocused } from '@react-navigation/native';
 import type { RouteProp } from '@react-navigation/native';
 import { usePeers } from '../hooks/usePeers';
-import { WifiOff, Send } from 'lucide-react-native';
+import { WifiOff, Send, Clock, Check, CheckCheck, AlertCircle } from 'lucide-react-native';
 import type { ChatStackParamList } from '../navigation/AppNavigator';
 
 type Route = RouteProp<ChatStackParamList, 'ChatDetail'>;
@@ -110,10 +110,31 @@ export function ChatDetailScreen() {
                 <Text style={s.timeLabel}>{formatTime(item.ts)}</Text>
               )}
               <View style={[s.bubbleRow, item.outgoing ? s.bubbleRowOut : s.bubbleRowIn]}>
-                <View style={[s.bubble, item.outgoing ? s.bubbleOut : s.bubbleIn]}>
-                  <Text style={[s.bubbleText, item.outgoing ? s.bubbleTextOut : s.bubbleTextIn]}>
-                    {item.text}
-                  </Text>
+                <View style={item.outgoing ? s.bubbleColOut : undefined}>
+                  <View style={[s.bubble, item.outgoing ? s.bubbleOut : s.bubbleIn]}>
+                    <Text style={[s.bubbleText, item.outgoing ? s.bubbleTextOut : s.bubbleTextIn]}>
+                      {item.text}
+                    </Text>
+                  </View>
+                  {item.outgoing && (
+                    <View style={s.deliveryBadge}>
+                      {item.status === 'sending' && (
+                        <><Clock size={11} color="#94a3b8" /><Text style={s.deliveryText}>Sending…</Text></>
+                      )}
+                      {(!item.status || item.status === 'sent') && (
+                        <Check size={11} color="#94a3b8" />
+                      )}
+                      {item.status === 'delivered' && (
+                        <CheckCheck size={11} color="#2563eb" />
+                      )}
+                      {item.status === 'failed' && (
+                        <TouchableOpacity style={s.retryBtn} onPress={() => send(peerId, item.text)}>
+                          <AlertCircle size={11} color="#dc2626" />
+                          <Text style={s.retryText}>Tap to retry</Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
+                  )}
                 </View>
               </View>
             </View>
@@ -185,6 +206,13 @@ const s = StyleSheet.create({
   bubbleText: { fontSize: 15, lineHeight: 21 },
   bubbleTextOut: { color: '#fff' },
   bubbleTextIn:  { color: '#0f172a' },
+
+  // Delivery status
+  bubbleColOut: { alignItems: 'flex-end' },
+  deliveryBadge: { flexDirection: 'row', alignItems: 'center', gap: 3, marginTop: 2, marginRight: 4 },
+  deliveryText:  { fontSize: 10, color: '#94a3b8' },
+  retryBtn:      { flexDirection: 'row', alignItems: 'center', gap: 3 },
+  retryText:     { fontSize: 10, color: '#dc2626' },
 
   // Input
   inputBar: {

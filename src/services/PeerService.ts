@@ -13,9 +13,12 @@ import {
 } from '../../modules/expo-bluetooth-scanner';
 import type { BluetoothDevice } from '../../modules/expo-bluetooth-scanner';
 import { usePeerStore } from '../store/peerStore';
-import { encodeFrames, ChunkReassembler, setChunkSize } from '../transport/framer';
 import {
-  initDb, insertMessage, upsertConversation, loadConversations,
+  encodeFramesWithId, encodeAck, ChunkReassembler, setChunkSize,
+} from '../transport/framer';
+import type { OnAck } from '../transport/framer';
+import {
+  initDb, insertMessage, updateMessageStatus, upsertConversation, loadConversations,
 } from '../storage/ChatDb';
 
 // ── Chat service / characteristic UUIDs (must match Swift BLEChatUUIDs) ────────
@@ -25,6 +28,18 @@ const TX_CHAR      = '1234567A-0000-4B5A-8000-52454D4F5445'; // notify  (peer �
 const RX_CHAR      = '1234567B-0000-4B5A-8000-52454D4F5445'; // write   (us → peer)
 
 const SCAN_TIMEOUT_S = 15;
+const MAX_RETRIES = 3;
+const ACK_TIMEOUT_MS = 5000;
+
+interface PendingOutbound {
+  localId: number;
+  deviceId: string;
+  text: string;
+  frames: string[];
+  msgId: number;
+  attempts: number;
+  timer: ReturnType<typeof setTimeout> | null;
+}
 
 // ── PeerService ────────────────────────────────────────────────────────────────
 //
@@ -48,27 +63,41 @@ class PeerService {
   private handshakingPeers = new Set<string>();
   /** Peers that completed handshake and are ready to message. */
   private pairedPeers = new Set<string>();
+  /** Pending outbound messages awaiting ACK, keyed by msgId. */
+  private retryQueue = new Map<number, PendingOutbound>();
+
   /** Reassembles chunked TX notifications into complete messages. */
-  private reassembler = new ChunkReassembler((text, { peerId }) => {
-    const peer = usePeerStore.getState().peers.find((p) => p.id === peerId);
-    const msg = { peerId, text, ts: Date.now(), outgoing: false };
-    usePeerStore.getState().addMessage(msg);
-    usePeerStore.getState().appendChatMessage(peerId, msg);
-    // Persist to DB
-    try {
-      insertMessage(peerId, peer?.remotePeerId ?? '', text, msg.ts, false);
-      const conv = {
-        peerId,
-        peerName: peer?.name ?? peerId.slice(0, 8),
-        remotePeerId: peer?.remotePeerId ?? '',
-        lastText: text,
-        lastTs: msg.ts,
-        unread: 1,
-      };
-      upsertConversation(conv.peerId, conv.peerName, conv.remotePeerId, conv.lastText, conv.lastTs, true);
-      usePeerStore.getState().upsertConversation({ ...conv });
-    } catch { /* DB write errors must not crash the app */ }
-  });
+  private reassembler = new ChunkReassembler(
+    // onComplete: incoming message arrived
+    (text, { peerId, msgId }) => {
+      const peer = usePeerStore.getState().peers.find((p) => p.id === peerId);
+      const msg = { peerId, text, ts: Date.now(), outgoing: false };
+      usePeerStore.getState().addMessage(msg);
+      usePeerStore.getState().appendChatMessage(peerId, msg);
+      // Persist to DB
+      try {
+        insertMessage(peerId, peer?.remotePeerId ?? '', text, msg.ts, false);
+        const conv = {
+          peerId,
+          peerName: peer?.name ?? peerId.slice(0, 8),
+          remotePeerId: peer?.remotePeerId ?? '',
+          lastText: text,
+          lastTs: msg.ts,
+          unread: 1,
+        };
+        upsertConversation(conv.peerId, conv.peerName, conv.remotePeerId, conv.lastText, conv.lastTs, true);
+        usePeerStore.getState().upsertConversation({ ...conv });
+      } catch { /* DB write errors must not crash the app */ }
+      // Send ACK back to sender over RX_CHAR
+      try {
+        writeCharacteristic(peerId, CHAT_SERVICE, RX_CHAR, encodeAck(msgId), false);
+      } catch { /* non-fatal — ACK best-effort */ }
+    },
+    // onAck: our outgoing message was delivered
+    ((peerId: string, ackMsgId: number) => {
+      this._handleAck(peerId, ackMsgId);
+    }) as OnAck,
+  );
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -123,6 +152,7 @@ class PeerService {
           this.handshakingPeers.delete(id);
           this.pairedPeers.delete(id);
           this.reassembler.clear(id);
+          this._cancelPendingForDevice(id);
           usePeerStore.getState().setPeerState(id, 'disconnected', undefined, evt.error);
         }
 
@@ -130,6 +160,7 @@ class PeerService {
           this.handshakingPeers.delete(id);
           this.pairedPeers.delete(id);
           this.reassembler.clear(id);
+          this._cancelPendingForDevice(id);
           usePeerStore.getState().setPeerState(id, 'failed', undefined, evt.error ?? 'Connection failed');
         }
       }),
@@ -242,23 +273,17 @@ class PeerService {
     this.handshakingPeers.delete(deviceId);
     this.pairedPeers.delete(deviceId);
     this.reassembler.clear(deviceId);
+    this._cancelPendingForDevice(deviceId);
     disconnectDevice(deviceId);
   }
 
   sendMessage(deviceId: string, text: string) {
-    // Split into MTU-sized frames and write each one
-    const frames = encodeFrames(text);
-    for (const frame of frames) {
-      writeCharacteristic(deviceId, CHAT_SERVICE, RX_CHAR, frame, false);
-    }
+    const { frames, msgId } = encodeFramesWithId(text);
     const peer = usePeerStore.getState().peers.find((p) => p.id === deviceId);
     const ts = Date.now();
-    const msg = { peerId: deviceId, text, ts, outgoing: true };
-    usePeerStore.getState().addMessage(msg);
-    usePeerStore.getState().appendChatMessage(deviceId, msg);
-    // Persist
+    let localId = -1;
     try {
-      insertMessage(deviceId, peer?.remotePeerId ?? '', text, ts, true);
+      localId = insertMessage(deviceId, peer?.remotePeerId ?? '', text, ts, true, 'sending');
       const conv = {
         peerId: deviceId,
         peerName: peer?.name ?? deviceId.slice(0, 8),
@@ -270,9 +295,68 @@ class PeerService {
       upsertConversation(conv.peerId, conv.peerName, conv.remotePeerId, conv.lastText, conv.lastTs, false);
       usePeerStore.getState().upsertConversation({ ...conv });
     } catch { /* non-fatal */ }
+
+    const msg = { peerId: deviceId, text, ts, outgoing: true, status: 'sending' as const, localId };
+    usePeerStore.getState().addMessage(msg);
+    usePeerStore.getState().appendChatMessage(deviceId, msg);
+
+    const pending: PendingOutbound = {
+      localId, deviceId, text, frames, msgId, attempts: 0, timer: null,
+    };
+    this.retryQueue.set(msgId, pending);
+    this._attemptSend(msgId);
   }
 
   // ── Private helpers ────────────────────────────────────────────────────────
+
+  private _attemptSend(msgId: number): void {
+    const pending = this.retryQueue.get(msgId);
+    if (!pending) return;
+    pending.attempts++;
+    for (const frame of pending.frames) {
+      try {
+        writeCharacteristic(pending.deviceId, CHAT_SERVICE, RX_CHAR, frame, false);
+      } catch { /* network error handled by timeout */ }
+    }
+    pending.timer = setTimeout(() => this._onAckTimeout(msgId), ACK_TIMEOUT_MS);
+  }
+
+  private _onAckTimeout(msgId: number): void {
+    const pending = this.retryQueue.get(msgId);
+    if (!pending) return;
+    if (pending.attempts < MAX_RETRIES) {
+      this._attemptSend(msgId);
+    } else {
+      this.retryQueue.delete(msgId);
+      if (pending.localId >= 0) {
+        try { updateMessageStatus(pending.localId, 'failed'); } catch { /* non-fatal */ }
+      }
+      usePeerStore.getState().updateMessageStatus(pending.deviceId, pending.localId, 'failed');
+    }
+  }
+
+  private _handleAck(peerId: string, ackMsgId: number): void {
+    const pending = this.retryQueue.get(ackMsgId);
+    if (!pending || pending.deviceId !== peerId) return;
+    if (pending.timer) clearTimeout(pending.timer);
+    this.retryQueue.delete(ackMsgId);
+    if (pending.localId >= 0) {
+      try { updateMessageStatus(pending.localId, 'delivered'); } catch { /* non-fatal */ }
+    }
+    usePeerStore.getState().updateMessageStatus(peerId, pending.localId, 'delivered');
+  }
+
+  private _cancelPendingForDevice(deviceId: string): void {
+    for (const [msgId, pending] of this.retryQueue) {
+      if (pending.deviceId !== deviceId) continue;
+      if (pending.timer) clearTimeout(pending.timer);
+      this.retryQueue.delete(msgId);
+      if (pending.localId >= 0) {
+        try { updateMessageStatus(pending.localId, 'failed'); } catch { /* non-fatal */ }
+      }
+      usePeerStore.getState().updateMessageStatus(deviceId, pending.localId, 'failed');
+    }
+  }
 
   private _isChatPeer(device: BluetoothDevice): boolean {
     return (device.serviceUUIDs ?? []).some(

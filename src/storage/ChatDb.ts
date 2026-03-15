@@ -25,6 +25,10 @@ export function initDb(): void {
       unread     INTEGER NOT NULL DEFAULT 0
     );
   `);
+  // Idempotent migration: add status column if it doesn't exist yet
+  try {
+    db.execSync(`ALTER TABLE messages ADD COLUMN status TEXT NOT NULL DEFAULT 'sent'`);
+  } catch { /* column already exists — ignore */ }
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -36,6 +40,7 @@ export interface StoredMessage {
   text: string;
   ts: number;
   outgoing: number; // 0 = incoming, 1 = outgoing
+  status: string;   // 'sending' | 'sent' | 'delivered' | 'failed'
 }
 
 export interface StoredConversation {
@@ -49,18 +54,25 @@ export interface StoredConversation {
 
 // ── Writes ────────────────────────────────────────────────────────────────────
 
+/** Inserts a message row and returns the new row's SQLite id. */
 export function insertMessage(
   peerId: string,
   remotePeerId: string,
   text: string,
   ts: number,
   outgoing: boolean,
-): void {
-  db.runSync(
-    `INSERT INTO messages (peerId, remotePeerId, text, ts, outgoing)
-     VALUES (?, ?, ?, ?, ?)`,
-    peerId, remotePeerId, text, ts, outgoing ? 1 : 0,
+  status = 'sent',
+): number {
+  const result = db.runSync(
+    `INSERT INTO messages (peerId, remotePeerId, text, ts, outgoing, status)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    peerId, remotePeerId, text, ts, outgoing ? 1 : 0, status,
   );
+  return result.lastInsertRowId;
+}
+
+export function updateMessageStatus(rowId: number, status: string): void {
+  db.runSync(`UPDATE messages SET status = ? WHERE id = ?`, status, rowId);
 }
 
 export function upsertConversation(

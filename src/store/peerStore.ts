@@ -29,6 +29,8 @@ export interface PeerMessage {
   text: string;
   ts: number;
   outgoing: boolean;
+  status?: 'sending' | 'sent' | 'delivered' | 'failed';
+  localId?: number; // SQLite row id for updateMessageStatus
 }
 
 // ── Store ──────────────────────────────────────────────────────────────────────
@@ -50,6 +52,7 @@ interface PeerStoreState {
   upsertConversation: (conv: StoredConversation) => void;
   setChatMessages: (peerId: string, msgs: PeerMessage[]) => void;
   appendChatMessage: (peerId: string, msg: PeerMessage) => void;
+  updateMessageStatus: (peerId: string, localId: number, status: PeerMessage['status']) => void;
   markRead: (peerId: string) => void;
 }
 
@@ -132,6 +135,20 @@ export const usePeerStore = create<PeerStoreState>((set) => ({
     set((s) => {
       const existing = s.chatMessages[peerId] ?? [];
       return { chatMessages: { ...s.chatMessages, [peerId]: [...existing, msg] } };
+    }),
+
+  updateMessageStatus: (peerId, localId, status) =>
+    set((s) => {
+      const msgs = s.chatMessages[peerId];
+      if (!msgs) return {};
+      return {
+        chatMessages: {
+          ...s.chatMessages,
+          [peerId]: msgs.map((m) =>
+            m.localId === localId ? { ...m, status } : m
+          ),
+        },
+      };
     }),
 
   markRead: (peerId) =>

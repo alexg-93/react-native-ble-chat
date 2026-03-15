@@ -37,6 +37,54 @@ function allocMsgId(): number {
   return nextMsgId;
 }
 
+// ── ACK frame support ────────────────────────────────────────────────────────
+
+/** flags byte value that marks a frame as an ACK (no payload). */
+export const FLAGS_ACK = 0x01;
+
+/** Encode an ACK for a given msgId into a single base64 frame. */
+export function encodeAck(msgId: number): string {
+  const frame = new Uint8Array(HEADER_SIZE);
+  frame[0] = (msgId >> 8) & 0xff;
+  frame[1] = msgId & 0xff;
+  frame[2] = 0;         // chunkIdx
+  frame[3] = 1;         // totalChunks
+  frame[4] = FLAGS_ACK; // flags
+  return uint8ToBase64(frame);
+}
+
+export function isAckFrame(bytes: Uint8Array): boolean {
+  return bytes.length >= HEADER_SIZE && bytes[4] === FLAGS_ACK;
+}
+
+export function decodeAckMsgId(bytes: Uint8Array): number {
+  return ((bytes[0] << 8) | bytes[1]) >>> 0;
+}
+
+/**
+ * Like encodeFrames but also returns the allocated msgId for ACK correlation.
+ */
+export function encodeFramesWithId(text: string): { frames: string[]; msgId: number } {
+  const msgId = allocMsgId();
+  const msgBytes = textToBytes(text);
+  const totalChunks = Math.max(1, Math.ceil(msgBytes.length / chunkPayloadSize));
+  if (totalChunks > 255) throw new Error(`Message too large (${totalChunks} chunks, max 255).`);
+  const frames: string[] = [];
+  for (let i = 0; i < totalChunks; i++) {
+    const chunkStart = i * chunkPayloadSize;
+    const chunk = msgBytes.slice(chunkStart, chunkStart + chunkPayloadSize);
+    const frame = new Uint8Array(HEADER_SIZE + chunk.length);
+    frame[0] = (msgId >> 8) & 0xff;
+    frame[1] = msgId & 0xff;
+    frame[2] = i;
+    frame[3] = totalChunks;
+    frame[4] = 0;
+    frame.set(chunk, HEADER_SIZE);
+    frames.push(uint8ToBase64(frame));
+  }
+  return { frames, msgId };
+}
+
 // ── Binary helpers ────────────────────────────────────────────────────────────
 
 /** Encode UTF-8 text to a Uint8Array (no TextEncoder dependency). */
@@ -126,6 +174,8 @@ export type OnMessageComplete = (
   context: { peerId: string; msgId: number }
 ) => void;
 
+export type OnAck = (peerId: string, msgId: number) => void;
+
 /**
  * Stateful chunk reassembler.
  *
@@ -140,9 +190,11 @@ export type OnMessageComplete = (
 export class ChunkReassembler {
   private pending = new Map<string, PendingMsg>();
   private onComplete: OnMessageComplete;
+  private onAck?: OnAck;
 
-  constructor(onComplete: OnMessageComplete) {
+  constructor(onComplete: OnMessageComplete, onAck?: OnAck) {
     this.onComplete = onComplete;
+    this.onAck = onAck;
   }
 
   receive(peerId: string, b64Frame: string): void {
@@ -154,10 +206,17 @@ export class ChunkReassembler {
     }
     if (bytes.length < HEADER_SIZE) return;
 
+    // Detect ACK frames before any chunk logic
+    if (isAckFrame(bytes)) {
+      const ackMsgId = decodeAckMsgId(bytes);
+      this.onAck?.(peerId, ackMsgId);
+      return;
+    }
+
     const msgId       = (bytes[0] << 8) | bytes[1];
     const chunkIdx    = bytes[2];
     const totalChunks = bytes[3];
-    // bytes[4] = flags (reserved)
+    // bytes[4] = flags (0 for data frames)
     const payload = bytes.slice(HEADER_SIZE);
 
     const key = `${peerId}:${msgId}`;
