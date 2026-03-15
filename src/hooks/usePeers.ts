@@ -35,6 +35,8 @@ export function usePeers() {
           text: r.text,
           ts: r.ts,
           outgoing: r.outgoing === 1,
+          status: (r.status as PeerMessage['status']) ?? 'sent',
+          localId: r.id,
         }));
         usePeerStore.getState().setChatMessages(peerId, msgs);
       } catch { /* DB may not be ready on first open */ }

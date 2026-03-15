@@ -10,6 +10,7 @@ import {
   addCharacteristicsDiscoveredListener,
   addCharacteristicReadListener,
   addCharacteristicChangedListener,
+  addMessageReceivedListener,
 } from '../../modules/expo-bluetooth-scanner';
 import type { BluetoothDevice } from '../../modules/expo-bluetooth-scanner';
 import { usePeerStore } from '../store/peerStore';
@@ -65,6 +66,46 @@ class PeerService {
   private pairedPeers = new Set<string>();
   /** Pending outbound messages awaiting ACK, keyed by msgId. */
   private retryQueue = new Map<number, PendingOutbound>();
+
+  /**
+   * Peripheral-role reassembler: handles frames written by centrals to OUR RX_CHAR.
+   * This is the path used when the remote device sends via writeCharacteristic
+   * (i.e. both devices are on PeersScreen / acting as central + peripheral).
+   * Routes received messages into peerStore so they appear in Quick Chat & ChatDetail.
+   */
+  private peripheralReassembler = new ChunkReassembler(
+    // onComplete: a central wrote a full message to our RX_CHAR
+    (text, { peerId: centralId, msgId }) => {
+      const store = usePeerStore.getState();
+      const peer = store.peers.find((p) => p.id === centralId);
+      if (!peer) return; // unknown central — not one of our paired peers, ignore
+      const ts = Date.now();
+      const msg = { peerId: centralId, text, ts, outgoing: false };
+      store.addMessage(msg);
+      store.appendChatMessage(centralId, msg);
+      try {
+        insertMessage(centralId, peer.remotePeerId, text, ts, false);
+        upsertConversation(
+          centralId, peer.name ?? centralId.slice(0, 8), peer.remotePeerId,
+          text, ts, true,
+        );
+        store.upsertConversation({
+          peerId: centralId, peerName: peer.name ?? centralId.slice(0, 8),
+          remotePeerId: peer.remotePeerId, lastText: text, lastTs: ts, unread: 1,
+        });
+      } catch { /* DB write errors must not crash the app */ }
+      // Send ACK back: write to the central's RX_CHAR
+      // (we are already connected to that device as a central too, so
+      //  writeCharacteristic targeting centralId works if paired)
+      try {
+        writeCharacteristic(centralId, CHAT_SERVICE, RX_CHAR, encodeAck(msgId), false);
+      } catch { /* ACK is best-effort */ }
+    },
+    // onAck: the remote device ACKed one of our outgoing messages via a RX write
+    ((centralId: string, ackMsgId: number) => {
+      this._handleAck(centralId, ackMsgId);
+    }) as OnAck,
+  );
 
   /** Reassembles chunked TX notifications into complete messages. */
   private reassembler = new ChunkReassembler(
@@ -152,6 +193,7 @@ class PeerService {
           this.handshakingPeers.delete(id);
           this.pairedPeers.delete(id);
           this.reassembler.clear(id);
+          this.peripheralReassembler.clear(id);
           this._cancelPendingForDevice(id);
           usePeerStore.getState().setPeerState(id, 'disconnected', undefined, evt.error);
         }
@@ -160,6 +202,7 @@ class PeerService {
           this.handshakingPeers.delete(id);
           this.pairedPeers.delete(id);
           this.reassembler.clear(id);
+          this.peripheralReassembler.clear(id);
           this._cancelPendingForDevice(id);
           usePeerStore.getState().setPeerState(id, 'failed', undefined, evt.error ?? 'Connection failed');
         }
@@ -245,6 +288,17 @@ class PeerService {
         this.reassembler.receive(evt.id, evt.value);
       }),
     );
+
+    // 8. RX write (peripheral role) → feed frame into peripheralReassembler.
+    // This fires when a remote central writes to OUR RX_CHAR, which is the path
+    // used by peerService.sendMessage on the remote device. Routing it here means
+    // messages are visible in peerStore (PeersScreen Quick Chat + ChatDetailScreen)
+    // even when both devices are on the Peers tab (central + peripheral simultaneously).
+    this.subs.push(
+      addMessageReceivedListener((evt) => {
+        this.peripheralReassembler.receive(evt.centralId, evt.value);
+      }),
+    );
   }
 
   unsubscribe() {
@@ -273,6 +327,7 @@ class PeerService {
     this.handshakingPeers.delete(deviceId);
     this.pairedPeers.delete(deviceId);
     this.reassembler.clear(deviceId);
+    this.peripheralReassembler.clear(deviceId);
     this._cancelPendingForDevice(deviceId);
     disconnectDevice(deviceId);
   }

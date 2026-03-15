@@ -109,17 +109,18 @@ export function ChatDetailScreen() {
               {showTime && (
                 <Text style={s.timeLabel}>{formatTime(item.ts)}</Text>
               )}
-              <View style={[s.bubbleRow, item.outgoing ? s.bubbleRowOut : s.bubbleRowIn]}>
-                <View style={item.outgoing ? s.bubbleColOut : undefined}>
-                  <View style={[s.bubble, item.outgoing ? s.bubbleOut : s.bubbleIn]}>
-                    <Text style={[s.bubbleText, item.outgoing ? s.bubbleTextOut : s.bubbleTextIn]}>
-                      {item.text}
-                    </Text>
-                  </View>
-                  {item.outgoing && (
+              {item.outgoing ? (
+                <View style={[s.bubbleRow, s.bubbleRowOut]}>
+                  <View style={s.bubbleColOut}>
+                    <View style={[s.bubble, s.bubbleOut]}>
+                      <Text style={[s.bubbleText, s.bubbleTextOut]}>{item.text}</Text>
+                    </View>
                     <View style={s.deliveryBadge}>
                       {item.status === 'sending' && (
-                        <><Clock size={11} color="#94a3b8" /><Text style={s.deliveryText}>Sending…</Text></>
+                        <>
+                          <Clock size={11} color="#94a3b8" />
+                          <Text style={s.deliveryText}>Sending…</Text>
+                        </>
                       )}
                       {(!item.status || item.status === 'sent') && (
                         <Check size={11} color="#94a3b8" />
@@ -134,9 +135,15 @@ export function ChatDetailScreen() {
                         </TouchableOpacity>
                       )}
                     </View>
-                  )}
+                  </View>
                 </View>
-              </View>
+              ) : (
+                <View style={[s.bubbleRow, s.bubbleRowIn]}>
+                  <View style={[s.bubble, s.bubbleIn]}>
+                    <Text style={[s.bubbleText, s.bubbleTextIn]}>{item.text}</Text>
+                  </View>
+                </View>
+              )}
             </View>
           );
         }}
@@ -197,18 +204,20 @@ const s = StyleSheet.create({
   bubbleRow: { flexDirection: 'row', marginBottom: 4 },
   bubbleRowOut: { justifyContent: 'flex-end' },
   bubbleRowIn:  { justifyContent: 'flex-start' },
+  // bubble = shared padding/radius only; maxWidth is on bubbleIn (direct child of row)
+  // and on bubbleColOut (outgoing wrapper, also a direct child of row) → % resolves correctly
   bubble: {
-    maxWidth: '75%', borderRadius: 18, paddingHorizontal: 14, paddingVertical: 10,
+    borderRadius: 18, paddingHorizontal: 14, paddingVertical: 10,
   },
   bubbleOut: { backgroundColor: '#2563eb', borderBottomRightRadius: 4 },
-  bubbleIn:  { backgroundColor: '#fff', borderBottomLeftRadius: 4,
+  bubbleIn:  { maxWidth: '75%', backgroundColor: '#fff', borderBottomLeftRadius: 4,
                shadowColor: '#000', shadowOpacity: 0.06, shadowRadius: 4, shadowOffset: { width: 0, height: 1 }, elevation: 1 },
   bubbleText: { fontSize: 15, lineHeight: 21 },
   bubbleTextOut: { color: '#fff' },
   bubbleTextIn:  { color: '#0f172a' },
 
   // Delivery status
-  bubbleColOut: { alignItems: 'flex-end' },
+  bubbleColOut: { maxWidth: '75%', alignItems: 'flex-end' },
   deliveryBadge: { flexDirection: 'row', alignItems: 'center', gap: 3, marginTop: 2, marginRight: 4 },
   deliveryText:  { fontSize: 10, color: '#94a3b8' },
   retryBtn:      { flexDirection: 'row', alignItems: 'center', gap: 3 },
