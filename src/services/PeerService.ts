@@ -16,9 +16,9 @@ import {
 import type { BluetoothDevice } from '../../modules/expo-bluetooth-scanner';
 import { usePeerStore } from '../store/peerStore';
 import {
-  encodeFramesWithId, encodeAck, ChunkReassembler, setChunkSize,
+  encodeFramesWithId, encodeAck, encodeTyping, ChunkReassembler, setChunkSize,
 } from '../transport/framer';
-import type { OnAck } from '../transport/framer';
+import type { OnAck, OnTyping } from '../transport/framer';
 import {
   initDb, insertMessage, updateMessageStatus, upsertConversation, loadConversations,
 } from '../storage/ChatDb';
@@ -98,6 +98,8 @@ class PeerService {
       if (!this.centralIdToDevice.has(centralId)) {
         this.centralIdToDevice.set(centralId, deviceId);
       }
+      // Clear typing indicator when a full message arrives
+      store.setTyping(deviceId, false);
       const peer = store.peers.find((p) => p.id === deviceId);
       if (!peer) return;
       const ts = Date.now();
@@ -126,6 +128,12 @@ class PeerService {
       const deviceId = this.centralIdToDevice.get(centralId) ?? centralId;
       this._handleAck(deviceId, ackMsgId);
     }) as OnAck,
+    // onTyping: remote central is typing (or stopped)
+    ((centralId: string, isTyping: boolean) => {
+      const deviceId = this.centralIdToDevice.get(centralId)
+        ?? usePeerStore.getState().peers.filter((p) => p.state === 'paired').find(Boolean)?.id;
+      if (deviceId) usePeerStore.getState().setTyping(deviceId, isTyping);
+    }) as OnTyping,
   );
 
   /** Reassembles chunked TX notifications into complete messages. */
@@ -133,6 +141,8 @@ class PeerService {
     // onComplete: incoming message arrived
     (text, { peerId, msgId }) => {
       const peer = usePeerStore.getState().peers.find((p) => p.id === peerId);
+      // Clear typing indicator when full message arrives
+      usePeerStore.getState().setTyping(peerId, false);
       const msg = { peerId, text, ts: Date.now(), outgoing: false };
       usePeerStore.getState().addMessage(msg);
       usePeerStore.getState().appendChatMessage(peerId, msg);
@@ -159,6 +169,10 @@ class PeerService {
     ((peerId: string, ackMsgId: number) => {
       this._handleAck(peerId, ackMsgId);
     }) as OnAck,
+    // onTyping: remote peer started or stopped typing
+    ((peerId: string, isTyping: boolean) => {
+      usePeerStore.getState().setTyping(peerId, isTyping);
+    }) as OnTyping,
   );
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
@@ -217,6 +231,7 @@ class PeerService {
           this.peripheralReassembler.clear(id);
           this._removeCentralMapping(id);
           this._cancelPendingForDevice(id);
+          usePeerStore.getState().setTyping(id, false);
           usePeerStore.getState().setPeerState(id, 'disconnected', undefined, evt.error);
         }
 
@@ -227,6 +242,7 @@ class PeerService {
           this.peripheralReassembler.clear(id);
           this._removeCentralMapping(id);
           this._cancelPendingForDevice(id);
+          usePeerStore.getState().setTyping(id, false);
           usePeerStore.getState().setPeerState(id, 'failed', undefined, evt.error ?? 'Connection failed');
         }
       }),
@@ -365,6 +381,14 @@ class PeerService {
     this._removeCentralMapping(deviceId);
     this._cancelPendingForDevice(deviceId);
     disconnectDevice(deviceId);
+  }
+
+  /** Send a typing indicator frame to a paired peer. Best-effort — no retry, no ACK. */
+  sendTyping(deviceId: string, isTyping: boolean) {
+    if (!this.pairedPeers.has(deviceId)) return;
+    try {
+      writeCharacteristic(deviceId, CHAT_SERVICE, RX_CHAR, encodeTyping(isTyping), false);
+    } catch { /* non-fatal */ }
   }
 
   sendMessage(deviceId: string, text: string) {

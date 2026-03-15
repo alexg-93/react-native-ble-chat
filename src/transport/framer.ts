@@ -42,6 +42,9 @@ function allocMsgId(): number {
 /** flags byte value that marks a frame as an ACK (no payload). */
 export const FLAGS_ACK = 0x01;
 
+/** flags byte value that marks a frame as a typing indicator (no payload). */
+export const FLAGS_TYPING = 0x02;
+
 /** Encode an ACK for a given msgId into a single base64 frame. */
 export function encodeAck(msgId: number): string {
   const frame = new Uint8Array(HEADER_SIZE);
@@ -59,6 +62,28 @@ export function isAckFrame(bytes: Uint8Array): boolean {
 
 export function decodeAckMsgId(bytes: Uint8Array): number {
   return ((bytes[0] << 8) | bytes[1]) >>> 0;
+}
+
+/**
+ * Encode a typing indicator frame (5 bytes, no payload).
+ * `isTyping=true` → FLAGS_TYPING; `isTyping=false` → FLAGS_TYPING | 0x80 (stop).
+ */
+export function encodeTyping(isTyping: boolean): string {
+  const frame = new Uint8Array(HEADER_SIZE);
+  frame[0] = 0; frame[1] = 0;  // msgId unused
+  frame[2] = 0; frame[3] = 1;  // single chunk
+  frame[4] = isTyping ? FLAGS_TYPING : (FLAGS_TYPING | 0x80);
+  return uint8ToBase64(frame);
+}
+
+export function isTypingFrame(bytes: Uint8Array): boolean {
+  return bytes.length >= HEADER_SIZE &&
+    (bytes[4] === FLAGS_TYPING || bytes[4] === (FLAGS_TYPING | 0x80));
+}
+
+/** Returns true if it's a "started typing" frame, false for "stopped typing". */
+export function decodeTypingState(bytes: Uint8Array): boolean {
+  return bytes[4] === FLAGS_TYPING;
 }
 
 /**
@@ -175,6 +200,7 @@ export type OnMessageComplete = (
 ) => void;
 
 export type OnAck = (peerId: string, msgId: number) => void;
+export type OnTyping = (peerId: string, isTyping: boolean) => void;
 
 /**
  * Stateful chunk reassembler.
@@ -191,10 +217,12 @@ export class ChunkReassembler {
   private pending = new Map<string, PendingMsg>();
   private onComplete: OnMessageComplete;
   private onAck?: OnAck;
+  private onTyping?: OnTyping;
 
-  constructor(onComplete: OnMessageComplete, onAck?: OnAck) {
+  constructor(onComplete: OnMessageComplete, onAck?: OnAck, onTyping?: OnTyping) {
     this.onComplete = onComplete;
     this.onAck = onAck;
+    this.onTyping = onTyping;
   }
 
   receive(peerId: string, b64Frame: string): void {
@@ -206,10 +234,13 @@ export class ChunkReassembler {
     }
     if (bytes.length < HEADER_SIZE) return;
 
-    // Detect ACK frames before any chunk logic
+    // Detect control frames before any chunk logic
     if (isAckFrame(bytes)) {
-      const ackMsgId = decodeAckMsgId(bytes);
-      this.onAck?.(peerId, ackMsgId);
+      this.onAck?.(peerId, decodeAckMsgId(bytes));
+      return;
+    }
+    if (isTypingFrame(bytes)) {
+      this.onTyping?.(peerId, decodeTypingState(bytes));
       return;
     }
 

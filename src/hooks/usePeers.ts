@@ -25,6 +25,7 @@ export function usePeers() {
     connect:    (id: string)                => peerService.connect(id),
     disconnect: (id: string)                => peerService.disconnect(id),
     send:       (id: string, text: string)  => peerService.sendMessage(id, text),
+    sendTyping: (id: string, isTyping: boolean) => peerService.sendTyping(id, isTyping),
 
     /** Load message history from SQLite into chatMessages[peerId]. */
     loadChatHistory: (peerId: string) => {

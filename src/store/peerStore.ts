@@ -41,6 +41,8 @@ interface PeerStoreState {
   messages: PeerMessage[];            // live in-session buffer (Peers tab)
   conversations: StoredConversation[]; // persisted conversation list (Chat tab)
   chatMessages: Record<string, PeerMessage[]>; // history for open ChatDetailScreen
+  /** Set of deviceIds whose remote peer is currently typing. */
+  peerTyping: Set<string>;
 
   setScanning: (v: boolean) => void;
   /** Insert or update a peer record. Does not downgrade an active connection state. */
@@ -53,6 +55,7 @@ interface PeerStoreState {
   setChatMessages: (peerId: string, msgs: PeerMessage[]) => void;
   appendChatMessage: (peerId: string, msg: PeerMessage) => void;
   updateMessageStatus: (peerId: string, localId: number, status: PeerMessage['status']) => void;
+  setTyping: (peerId: string, isTyping: boolean) => void;
   markRead: (peerId: string) => void;
 }
 
@@ -64,6 +67,7 @@ export const usePeerStore = create<PeerStoreState>((set) => ({
   messages: [],
   conversations: [],
   chatMessages: {},
+  peerTyping: new Set<string>(),
 
   setScanning: (scanning) => set({ scanning }),
 
@@ -149,6 +153,13 @@ export const usePeerStore = create<PeerStoreState>((set) => ({
           ),
         },
       };
+    }),
+
+  setTyping: (peerId, isTyping) =>
+    set((s) => {
+      const next = new Set(s.peerTyping);
+      if (isTyping) next.add(peerId); else next.delete(peerId);
+      return { peerTyping: next };
     }),
 
   markRead: (peerId) =>

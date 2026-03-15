@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, FlatList,
-  StyleSheet, KeyboardAvoidingView, Platform, ActivityIndicator,
+  StyleSheet, KeyboardAvoidingView, Platform, ActivityIndicator, Animated,
 } from 'react-native';
 import { useRoute, useIsFocused } from '@react-navigation/native';
 import type { RouteProp } from '@react-navigation/native';
@@ -15,21 +15,60 @@ function formatTime(ts: number): string {
   return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
+function TypingDots() {
+  const dot0 = useRef(new Animated.Value(0)).current;
+  const dot1 = useRef(new Animated.Value(0)).current;
+  const dot2 = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    const make = (v: Animated.Value, delay: number) =>
+      Animated.loop(
+        Animated.sequence([
+          Animated.delay(delay),
+          Animated.timing(v, { toValue: 1, duration: 300, useNativeDriver: true }),
+          Animated.timing(v, { toValue: 0, duration: 300, useNativeDriver: true }),
+          Animated.delay(450 - delay),
+        ]),
+      );
+    const a0 = make(dot0, 0);
+    const a1 = make(dot1, 150);
+    const a2 = make(dot2, 300);
+    a0.start(); a1.start(); a2.start();
+    return () => { a0.stop(); a1.stop(); a2.stop(); };
+  }, [dot0, dot1, dot2]);
+
+  const dotStyle = (v: Animated.Value) => ({
+    opacity: v.interpolate({ inputRange: [0, 1], outputRange: [0.3, 1] }),
+    transform: [{ scale: v.interpolate({ inputRange: [0, 1], outputRange: [0.7, 1.1] }) }],
+  });
+
+  return (
+    <View style={s.dotsRow}>
+      <Animated.View style={[s.dot, dotStyle(dot0)]} />
+      <Animated.View style={[s.dot, dotStyle(dot1)]} />
+      <Animated.View style={[s.dot, dotStyle(dot2)]} />
+    </View>
+  );
+}
+
 export function ChatDetailScreen() {
   const route = useRoute<Route>();
   const { peerId, peerName } = route.params;
   const isFocused = useIsFocused();
 
-  const { peers, chatMessages, send, connect, loadChatHistory, markRead } = usePeers();
+  const { peers, chatMessages, peerTyping, send, sendTyping, connect, loadChatHistory, markRead } = usePeers();
 
   const peer = peers.find((p) => p.id === peerId);
   const isPaired = peer?.state === 'paired';
   const isConnecting = peer?.state === 'connecting' || peer?.state === 'handshaking';
   const canSend = isPaired;
 
+  const isRemoteTyping = peerTyping.has(peerId);
+
   const messages = chatMessages[peerId] ?? [];
   const [draft, setDraft] = useState('');
   const listRef = useRef<FlatList>(null);
+  const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Load history from DB on mount
   useEffect(() => {
@@ -48,12 +87,25 @@ export function ChatDetailScreen() {
     }
   }, [messages.length]);
 
+  const handleDraftChange = useCallback((text: string) => {
+    setDraft(text);
+    if (!canSend) return;
+    if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
+    if (text.trim()) {
+      typingTimerRef.current = setTimeout(() => sendTyping(peerId, true), 400);
+    } else {
+      sendTyping(peerId, false);
+    }
+  }, [canSend, peerId, sendTyping]);
+
   const handleSend = useCallback(() => {
     const text = draft.trim();
     if (!text || !canSend) return;
+    if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
+    sendTyping(peerId, false);
     setDraft('');
     send(peerId, text);
-  }, [draft, canSend, peerId, send]);
+  }, [draft, canSend, peerId, send, sendTyping]);
 
   return (
     <KeyboardAvoidingView
@@ -149,12 +201,21 @@ export function ChatDetailScreen() {
         }}
       />
 
+      {/* ── Typing indicator ── */}
+      {isRemoteTyping && (
+        <View style={[s.bubbleRow, s.bubbleRowIn, s.typingRow]}>
+          <View style={[s.bubble, s.bubbleIn, s.typingBubble]}>
+            <TypingDots />
+          </View>
+        </View>
+      )}
+
       {/* ── Input bar ── */}
       <View style={s.inputBar}>
         <TextInput
           style={s.input}
           value={draft}
-          onChangeText={setDraft}
+          onChangeText={handleDraftChange}
           placeholder={canSend ? 'Message…' : 'Connect to send messages'}
           placeholderTextColor="#94a3b8"
           editable={canSend}
@@ -241,4 +302,13 @@ const s = StyleSheet.create({
   },
   sendBtnDisabled: { backgroundColor: '#cbd5e1' },
   sendIcon: { color: '#fff', fontSize: 20, fontWeight: '700', lineHeight: 22 },
+
+  // Typing indicator
+  typingRow: { paddingHorizontal: 16, paddingBottom: 4 },
+  typingBubble: { paddingVertical: 8, paddingHorizontal: 12 },
+  dotsRow: { flexDirection: 'row', alignItems: 'center', gap: 5, height: 20 },
+  dot: {
+    width: 8, height: 8, borderRadius: 4,
+    backgroundColor: '#94a3b8',
+  },
 });
