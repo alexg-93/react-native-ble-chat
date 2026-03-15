@@ -301,7 +301,7 @@ public class ExpoBluetoothScannerModule: Module {
         }
         guard !self.isScanning else { return }
         self.discoveredDeviceIds.removeAll()
-        self.nameCache.removeAll()   // fresh scan — don't serve stale cached names
+        self.bleDelegate.nameCache.removeAll()   // fresh scan — don't serve stale cached names
         self.isScanning = true
         c.scanForPeripherals(withServices: nil,
                              options: [CBCentralManagerScanOptionAllowDuplicatesKey: allowDuplicates])
