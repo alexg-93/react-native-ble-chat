@@ -11,6 +11,7 @@ import {
   addCharacteristicReadListener,
   addCharacteristicChangedListener,
   addMessageReceivedListener,
+  addCentralSubscribedListener,
 } from '../../modules/expo-bluetooth-scanner';
 import type { BluetoothDevice } from '../../modules/expo-bluetooth-scanner';
 import { usePeerStore } from '../store/peerStore';
@@ -68,42 +69,62 @@ class PeerService {
   private retryQueue = new Map<number, PendingOutbound>();
 
   /**
+   * Maps CBCentral.identifier → peer.id (CBPeripheral.identifier).
+   * iOS assigns different UUIDs to the same physical device depending on role, so we
+   * must maintain this mapping to route peripheral-RX messages to the right peer.
+   */
+  private centralIdToDevice = new Map<string, string>();
+  /** Queued centralIds received before the corresponding peer completed its GATT handshake. */
+  private unmatchedCentralSubs: string[] = [];
+
+  /**
    * Peripheral-role reassembler: handles frames written by centrals to OUR RX_CHAR.
-   * This is the path used when the remote device sends via writeCharacteristic
-   * (i.e. both devices are on PeersScreen / acting as central + peripheral).
-   * Routes received messages into peerStore so they appear in Quick Chat & ChatDetail.
+   * Needed when both devices run PeerService (both on PeersScreen or ChatDetailScreen)
+   * because sendMessage uses writeCharacteristic, which arrives here on the receiving end.
    */
   private peripheralReassembler = new ChunkReassembler(
     // onComplete: a central wrote a full message to our RX_CHAR
     (text, { peerId: centralId, msgId }) => {
       const store = usePeerStore.getState();
-      const peer = store.peers.find((p) => p.id === centralId);
-      if (!peer) return; // unknown central — not one of our paired peers, ignore
+      // CBCentral.identifier ≠ CBPeripheral.identifier for the same physical device.
+      // Resolve using our maintained mapping, falling back to the sole paired peer.
+      let deviceId = this.centralIdToDevice.get(centralId);
+      if (!deviceId) {
+        const pairedList = store.peers.filter((p) => p.state === 'paired');
+        if (pairedList.length === 1) deviceId = pairedList[0].id;
+      }
+      if (!deviceId) return; // can't route — drop
+      // Record the mapping so future frames + ACKs route instantly
+      if (!this.centralIdToDevice.has(centralId)) {
+        this.centralIdToDevice.set(centralId, deviceId);
+      }
+      const peer = store.peers.find((p) => p.id === deviceId);
+      if (!peer) return;
       const ts = Date.now();
-      const msg = { peerId: centralId, text, ts, outgoing: false };
+      const msg = { peerId: deviceId, text, ts, outgoing: false };
       store.addMessage(msg);
-      store.appendChatMessage(centralId, msg);
+      store.appendChatMessage(deviceId, msg);
       try {
-        insertMessage(centralId, peer.remotePeerId, text, ts, false);
+        insertMessage(deviceId, peer.remotePeerId, text, ts, false);
         upsertConversation(
-          centralId, peer.name ?? centralId.slice(0, 8), peer.remotePeerId,
+          deviceId, peer.name ?? deviceId.slice(0, 8), peer.remotePeerId,
           text, ts, true,
         );
         store.upsertConversation({
-          peerId: centralId, peerName: peer.name ?? centralId.slice(0, 8),
+          peerId: deviceId, peerName: peer.name ?? deviceId.slice(0, 8),
           remotePeerId: peer.remotePeerId, lastText: text, lastTs: ts, unread: 1,
         });
       } catch { /* DB write errors must not crash the app */ }
-      // Send ACK back: write to the central's RX_CHAR
-      // (we are already connected to that device as a central too, so
-      //  writeCharacteristic targeting centralId works if paired)
+      // Send ACK back using peer.id (CBPeripheral UUID) so writeCharacteristic targets correctly
       try {
-        writeCharacteristic(centralId, CHAT_SERVICE, RX_CHAR, encodeAck(msgId), false);
+        writeCharacteristic(deviceId, CHAT_SERVICE, RX_CHAR, encodeAck(msgId), false);
       } catch { /* ACK is best-effort */ }
     },
-    // onAck: the remote device ACKed one of our outgoing messages via a RX write
+    // onAck: the remote device ACKed one of our outgoing messages via a RX write.
+    // Resolve centralId → deviceId so _handleAck can match the retryQueue entry.
     ((centralId: string, ackMsgId: number) => {
-      this._handleAck(centralId, ackMsgId);
+      const deviceId = this.centralIdToDevice.get(centralId) ?? centralId;
+      this._handleAck(deviceId, ackMsgId);
     }) as OnAck,
   );
 
@@ -194,6 +215,7 @@ class PeerService {
           this.pairedPeers.delete(id);
           this.reassembler.clear(id);
           this.peripheralReassembler.clear(id);
+          this._removeCentralMapping(id);
           this._cancelPendingForDevice(id);
           usePeerStore.getState().setPeerState(id, 'disconnected', undefined, evt.error);
         }
@@ -203,6 +225,7 @@ class PeerService {
           this.pairedPeers.delete(id);
           this.reassembler.clear(id);
           this.peripheralReassembler.clear(id);
+          this._removeCentralMapping(id);
           this._cancelPendingForDevice(id);
           usePeerStore.getState().setPeerState(id, 'failed', undefined, evt.error ?? 'Connection failed');
         }
@@ -271,6 +294,8 @@ class PeerService {
 
         this.handshakingPeers.delete(evt.id);
         this.pairedPeers.add(evt.id);
+        // A peer just became paired — try to dequeue any awaiting centralId subscription
+        this._resolveCentralSubscription(evt.id);
 
         let remotePeerId = '';
         if (evt.value) {
@@ -291,12 +316,21 @@ class PeerService {
 
     // 8. RX write (peripheral role) → feed frame into peripheralReassembler.
     // This fires when a remote central writes to OUR RX_CHAR, which is the path
-    // used by peerService.sendMessage on the remote device. Routing it here means
-    // messages are visible in peerStore (PeersScreen Quick Chat + ChatDetailScreen)
-    // even when both devices are on the Peers tab (central + peripheral simultaneously).
+    // taken by peerService.sendMessage on the remote device when both are acting
+    // as central+peripheral simultaneously (Peers / ChatDetail with both advertising).
     this.subs.push(
       addMessageReceivedListener((evt) => {
         this.peripheralReassembler.receive(evt.centralId, evt.value);
+      }),
+    );
+
+    // 9. A remote central subscribed to our TX_CHAR (part of their GATT handshake).
+    // Use this to build the centralId → deviceId mapping needed to route peripheral-RX
+    // messages back to the correct peerStore entry.
+    this.subs.push(
+      addCentralSubscribedListener((evt) => {
+        if (evt.charUUID.toUpperCase() !== TX_CHAR) return;
+        this._recordCentralSubscription(evt.centralId);
       }),
     );
   }
@@ -328,6 +362,7 @@ class PeerService {
     this.pairedPeers.delete(deviceId);
     this.reassembler.clear(deviceId);
     this.peripheralReassembler.clear(deviceId);
+    this._removeCentralMapping(deviceId);
     this._cancelPendingForDevice(deviceId);
     disconnectDevice(deviceId);
   }
@@ -410,6 +445,40 @@ class PeerService {
         try { updateMessageStatus(pending.localId, 'failed'); } catch { /* non-fatal */ }
       }
       usePeerStore.getState().updateMessageStatus(deviceId, pending.localId, 'failed');
+    }
+  }
+
+  /**
+   * Called when `addCentralSubscribedListener` fires.
+   * Attempts to map the centralId to the currently-paired peer that has no mapping yet.
+   * If no paired peer is available yet, queues the centralId for deferred resolution.
+   */
+  private _recordCentralSubscription(centralId: string): void {
+    if (this.centralIdToDevice.has(centralId)) return;
+    const alreadyMapped = new Set(this.centralIdToDevice.values());
+    const unmappedPeer = [...this.pairedPeers].find((id) => !alreadyMapped.has(id));
+    if (unmappedPeer) {
+      this.centralIdToDevice.set(centralId, unmappedPeer);
+    } else {
+      this.unmatchedCentralSubs.push(centralId);
+    }
+  }
+
+  /**
+   * Called when a device finishes the GATT handshake (becomes paired).
+   * Dequeues the oldest unmatched centralId and maps it to this newly-paired device.
+   */
+  private _resolveCentralSubscription(deviceId: string): void {
+    const centralId = this.unmatchedCentralSubs.shift();
+    if (centralId && !this.centralIdToDevice.has(centralId)) {
+      this.centralIdToDevice.set(centralId, deviceId);
+    }
+  }
+
+  /** Remove all centralId→deviceId entries for a disconnected device. */
+  private _removeCentralMapping(deviceId: string): void {
+    for (const [cid, did] of this.centralIdToDevice) {
+      if (did === deviceId) this.centralIdToDevice.delete(cid);
     }
   }
 
